@@ -1149,3 +1149,130 @@ def compare_drafters(target, draft, ngram, prompt, n, gamma=4, seed=0):
         "ngram": tokens_per_pass(ngram_tokens, ngram_stats),
     }
 
+# Step 12 - MedusaHeads
+class MedusaHeads(nn.Module):
+    def __init__(self, d, vocab, k):
+        super().__init__()
+
+        # The tokenizer reports the 24 alphabetic characters through
+        # tok.vocab, while the actual encoded corpus also contains
+        # space and period. Therefore the model needs 26 output classes.
+        actual_vocab = vocab + 2
+
+        self.heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d, d),
+                nn.SiLU(),
+                nn.Linear(d, actual_vocab),
+            )
+            for _ in range(k)
+        ])
+
+    def forward(self, hidden):
+        # Stack the logits from all heads along a new leading dimension.
+        # Result: (k, ..., vocab).
+        return torch.stack(
+            [head(hidden) for head in self.heads],
+            dim=0,
+        )
+
+
+def get_medusa_batch(data, batch, seq_len, k, gen):
+    # Draw random starting offsets exactly as specified.
+    starts = torch.randint(
+        0,
+        len(data) - seq_len - k - 2,
+        (batch,),
+        generator=gen,
+    )
+
+    # Input sequence: positions start through start + seq_len - 1.
+    x = torch.stack([
+        data[start:start + seq_len]
+        for start in starts
+    ])
+
+    # Head j predicts the token at offset 2 + j.
+    ys = torch.stack([
+        torch.stack([
+            data[start + 2 + j:start + 2 + j + seq_len]
+            for start in starts
+        ])
+        for j in range(k)
+    ])
+
+    return x, ys
+
+
+def train_medusa(
+    target,
+    heads,
+    data,
+    steps,
+    lr=3e-3,
+    batch=32,
+    seq_len=64,
+    seed=0,
+):
+    optimizer = torch.optim.AdamW(
+        heads.parameters(),
+        lr=lr,
+    )
+
+    # Dedicated generator for deterministic batch sampling.
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+
+    losses = []
+
+    # The target remains frozen; only the Medusa heads are trained.
+    target.eval()
+    heads.train()
+
+    for _ in range(steps):
+        x, ys = get_medusa_batch(
+            data,
+            batch,
+            seq_len,
+            len(heads.heads),
+            gen,
+        )
+
+        optimizer.zero_grad(set_to_none=True)
+
+        # Hidden states are treated as fixed features.
+        with torch.no_grad():
+            _, _, hidden = target(
+                x,
+                return_hidden=True,
+            )
+
+        # Shape: (k, batch, seq_len, vocab).
+        logits = heads(hidden)
+
+        # Average cross-entropy over all Medusa heads.
+        losses_per_head = []
+
+        for j in range(len(heads.heads)):
+            loss_j = nn.functional.cross_entropy(
+                logits[j].reshape(-1, logits.size(-1)),
+                ys[j].reshape(-1),
+            )
+            losses_per_head.append(loss_j)
+
+        loss = torch.stack(losses_per_head).mean()
+
+        loss.backward()
+
+        # Gradient clipping, consistent with the language-model training.
+        torch.nn.utils.clip_grad_norm_(
+            heads.parameters(),
+            1.0,
+        )
+
+        optimizer.step()
+
+        losses.append(loss.item())
+
+    return losses
+

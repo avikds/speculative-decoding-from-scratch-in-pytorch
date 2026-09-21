@@ -21,6 +21,7 @@ python scaffold.py
 - [x] **9.** expected_tokens_per_pass
 - [x] **10.** NgramModel
 - [x] **11.** ngram_speculation
+- [x] **12.** MedusaHeads
 
 ---
 
