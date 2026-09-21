@@ -878,3 +878,45 @@ def check_distribution(
         ),
     }
 
+# Step 9 - expected_tokens_per_pass
+def expected_tokens_per_pass(alpha, gamma):
+    if alpha == 1:
+        return gamma + 1
+
+    return (1 - alpha ** (gamma + 1)) / (1 - alpha)
+
+
+def acceptance_by_gamma(target, draft, prompt, n, gammas, gen_seed=0):
+    results = {}
+
+    for gamma in gammas:
+        # Use the same deterministic generator for both drafting and
+        # verification during this gamma's complete generation run.
+        g = torch.Generator().manual_seed(gen_seed)
+
+        draft_fn = model_draft_fn(
+            draft,
+            gen=g,
+        )
+
+        tokens, stats = speculative_generate(
+            target,
+            draft_fn,
+            prompt,
+            n,
+            gamma=gamma,
+            gen=g,
+        )
+
+        alpha = acceptance_rate(stats)
+        measured = tokens_per_pass(tokens, stats)
+        formula = expected_tokens_per_pass(alpha, gamma)
+
+        results[gamma] = {
+            "alpha": alpha,
+            "measured": measured,
+            "formula": formula,
+        }
+
+    return results
+
