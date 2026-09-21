@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** TinyGPT
 - [x] **3.** train_lm
 - [x] **4.** generate
+- [x] **5.** draft_tokens
 
 ---
 

@@ -486,3 +486,59 @@ def generate(model, prompt, n, temperature=1.0, gen=None):
 
     return tokens, passes
 
+# Step 5 - draft_tokens
+@torch.no_grad()
+def draft_tokens(draft, prefix, gamma, temperature=1.0, gen=None):
+    # Keep the growing sequence as a 1-D tensor.
+    current = prefix
+
+    draft_ids = []
+    draft_probs = []
+
+    for _ in range(gamma):
+        # The draft model processes the entire growing prefix.
+        logits, _ = draft(current.unsqueeze(0))
+
+        # Distribution for the next token.
+        probs = next_probs(logits[0, -1], temperature)
+
+        # Sample the next token from that distribution.
+        token = sample_from(probs, gen)
+
+        draft_ids.append(token)
+        draft_probs.append(probs)
+
+        # Feed the sampled token back into the next forward pass.
+        next_token = torch.tensor(
+            [token],
+            dtype=current.dtype,
+            device=current.device,
+        )
+        current = torch.cat((current, next_token), dim=0)
+
+    # Convert sampled IDs and distributions to tensors.
+    ids = torch.tensor(
+        draft_ids,
+        dtype=torch.long,
+        device=prefix.device,
+    )
+
+    probs = torch.stack(draft_probs, dim=0)
+
+    return ids, probs
+
+
+def model_draft_fn(draft, temperature=1.0, gen=None):
+    # Return a generic drafter function so later speculative
+    # decoding code can replace the drafting strategy.
+    def f(prefix, gamma):
+        return draft_tokens(
+            draft,
+            prefix,
+            gamma,
+            temperature=temperature,
+            gen=gen,
+        )
+
+    return f
+
