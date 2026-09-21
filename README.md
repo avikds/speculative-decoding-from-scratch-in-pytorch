@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** generate
 - [x] **5.** draft_tokens
 - [x] **6.** verify_tokens
+- [x] **7.** speculative_generate
 
 ---
 

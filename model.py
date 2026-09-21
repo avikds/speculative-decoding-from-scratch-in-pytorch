@@ -625,3 +625,106 @@ def verify_tokens(target_probs, draft_ids, draft_probs, gen=None):
 
     return tokens, n_accepted
 
+# Step 7 - speculative_generate
+import torch
+
+@torch.no_grad()
+def speculative_generate(
+    target,
+    draft_fn,
+    prompt,
+    n,
+    gamma=4,
+    temperature=1.0,
+    gen=None,
+):
+    # Generated output tokens only; prompt is kept separately in ids.
+    tokens = []
+    ids = prompt.clone()
+
+    stats = {
+        "target_passes": 0,
+        "rounds": 0,
+        "drafted": 0,
+        "examined": 0,
+        "accepted": 0,
+    }
+
+    # Nothing to generate.
+    if n <= 0:
+        return tokens[:n], stats
+
+    while len(tokens) < n:
+        # Draft gamma candidate tokens from the current prefix.
+        draft_ids, draft_probs = draft_fn(ids, gamma)
+
+        stats["rounds"] += 1
+        stats["drafted"] += int(draft_ids.numel())
+
+        # One target forward pass on the prefix followed by all drafts.
+        target_input = torch.cat(
+            [
+                ids,
+                draft_ids.to(device=ids.device, dtype=ids.dtype),
+            ],
+            dim=0,
+        ).unsqueeze(0)
+
+        logits, _ = target(target_input)
+        stats["target_passes"] += 1
+
+        # For draft token i, the relevant target distribution is the
+        # next-token distribution at position len(ids) - 1 + i.
+        prefix_len = ids.numel()
+
+        target_probs = torch.stack([
+            next_probs(
+                logits[0, prefix_len - 1 + i],
+                temperature,
+            )
+            for i in range(gamma + 1)
+        ])
+
+        # Verify the proposed tokens using exact rejection sampling.
+        verified_tokens, n_accepted = verify_tokens(
+            target_probs,
+            draft_ids,
+            draft_probs,
+            gen=gen,
+        )
+
+        # The verifier examines all accepted drafts and, if necessary,
+        # the first rejected draft. It does not examine later drafts.
+        stats["accepted"] += n_accepted
+
+        if n_accepted < gamma:
+            # A rejection occurred. The rejected draft itself was examined.
+            stats["examined"] += n_accepted + 1
+        else:
+            # Every proposed draft was examined and accepted.
+            stats["examined"] += gamma
+
+        # Append the verified tokens to both the generated sequence
+        # and the running prefix used by the next speculation round.
+        verified_tensor = torch.tensor(
+            verified_tokens,
+            dtype=ids.dtype,
+            device=ids.device,
+        )
+
+        tokens.extend(verified_tokens)
+        ids = torch.cat(
+            [ids, verified_tensor],
+            dim=0,
+        )
+
+    return tokens[:n], stats
+
+
+def tokens_per_pass(tokens, stats):
+    return len(tokens) / stats["target_passes"]
+
+
+def acceptance_rate(stats):
+    return stats["accepted"] / stats["examined"]
+
