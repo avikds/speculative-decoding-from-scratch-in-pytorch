@@ -1083,3 +1083,69 @@ class NgramModel:
 
         return f
 
+# Step 11 - ngram_speculation
+def ngram_speculation(target, ngram, prompt, n, gamma=4, gen=None):
+    # Use the N-gram model through the same drafter interface used
+    # by the neural draft model.
+    draft_fn = ngram.draft_fn(gen=gen)
+
+    return speculative_generate(
+        target,
+        draft_fn,
+        prompt,
+        n,
+        gamma=gamma,
+        gen=gen,
+    )
+
+
+def prompt_lookup_model(prompt, n, vocab):
+    # Build an N-gram model using only the supplied prompt as its
+    # training corpus.
+    ngram = NgramModel(n, vocab)
+    ngram.fit(prompt)
+
+    return ngram
+
+
+def compare_drafters(target, draft, ngram, prompt, n, gamma=4, seed=0):
+    # Neural draft run with its own fresh, deterministically seeded
+    # generator shared between drafting and verification.
+    model_gen = torch.Generator().manual_seed(seed)
+
+    model_draft = model_draft_fn(
+        draft,
+        gen=model_gen,
+    )
+
+    model_tokens, model_stats = speculative_generate(
+        target,
+        model_draft,
+        prompt,
+        n,
+        gamma=gamma,
+        gen=model_gen,
+    )
+
+    # N-gram draft run with another fresh generator initialized with
+    # the same seed, so both methods start from the same RNG state.
+    ngram_gen = torch.Generator().manual_seed(seed)
+
+    ngram_draft = ngram.draft_fn(
+        gen=ngram_gen,
+    )
+
+    ngram_tokens, ngram_stats = speculative_generate(
+        target,
+        ngram_draft,
+        prompt,
+        n,
+        gamma=gamma,
+        gen=ngram_gen,
+    )
+
+    return {
+        "model": tokens_per_pass(model_tokens, model_stats),
+        "ngram": tokens_per_pass(ngram_tokens, ngram_stats),
+    }
+
