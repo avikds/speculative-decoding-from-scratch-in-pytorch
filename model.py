@@ -724,3 +724,157 @@ def tokens_per_pass(tokens, stats):
 def acceptance_rate(stats):
     return stats["accepted"] / stats["examined"]
 
+# Step 8 - check_distribution
+@torch.no_grad()
+def exact_next_probs(model, prefix, temperature=1.0):
+    # Run the model on the complete prefix and take the distribution
+    # corresponding to the next token after the final prefix position.
+    logits, _ = model(prefix.unsqueeze(0))
+    return next_probs(logits[0, -1], temperature)
+
+
+def total_variation(p, q):
+    # TV distance = 1/2 * L1 distance.
+    return 0.5 * torch.sum(torch.abs(p - q)).item()
+
+
+@torch.no_grad()
+def first_token_histogram(
+    target,
+    draft,
+    prefix,
+    n_samples,
+    gen,
+    accept_all=False,
+):
+    # The histogram covers the model vocabulary.
+    vocab = target.head.out_features
+    counts = torch.zeros(
+        vocab,
+        dtype=torch.float32,
+        device=prefix.device,
+    )
+
+    for _ in range(n_samples):
+        # Draft exactly one token from the current prefix.
+        draft_ids, draft_probs = draft_tokens(
+            draft,
+            prefix,
+            1,
+            gen=gen,
+        )
+
+        draft_token = int(draft_ids[0].item())
+
+        if accept_all:
+            # Skip verification and keep the draft token directly.
+            token = draft_token
+        else:
+            # Run the target once on prefix + the single draft token.
+            target_input = torch.cat(
+                [
+                    prefix,
+                    draft_ids.to(
+                        device=prefix.device,
+                        dtype=prefix.dtype,
+                    ),
+                ],
+                dim=0,
+            ).unsqueeze(0)
+
+            logits, _ = target(target_input)
+
+            # Row 0 predicts the draft token; row 1 is the distribution
+            # after that token and acts as the bonus distribution.
+            target_probs = torch.stack([
+                next_probs(logits[0, -2], 1.0),
+                next_probs(logits[0, -1], 1.0),
+            ])
+
+            verified, _ = verify_tokens(
+                target_probs,
+                draft_ids,
+                draft_probs,
+                gen=gen,
+            )
+
+            # gamma=1 always produces exactly one output token.
+            token = verified[0]
+
+        counts[token] += 1.0
+
+    # Convert counts to the empirical probability distribution.
+    return counts / n_samples
+
+
+@torch.no_grad()
+def hardest_prefix(target, draft, data, length=20, stride=50):
+    # Search only windows whose starting offsets are multiples of stride.
+    max_start = len(data) - length
+    best_start = 0
+    best_tv = -1.0
+
+    for start in range(0, max_start + 1, stride):
+        prefix = data[start:start + length]
+
+        target_probs = exact_next_probs(target, prefix)
+        draft_probs = exact_next_probs(draft, prefix)
+
+        tv = total_variation(target_probs, draft_probs)
+
+        if tv > best_tv:
+            best_tv = tv
+            best_start = start
+
+    return data[best_start:best_start + length]
+
+
+@torch.no_grad()
+def check_distribution(
+    target,
+    draft,
+    prefix,
+    n_samples=2000,
+    gen=None,
+):
+    # Compute the target's exact next-token distribution.
+    target_probs = exact_next_probs(target, prefix)
+
+    # Empirical distribution from exact speculative verification.
+    spec_hist = first_token_histogram(
+        target,
+        draft,
+        prefix,
+        n_samples,
+        gen,
+        accept_all=False,
+    )
+
+    # Empirical distribution when every draft token is accepted.
+    accept_all_hist = first_token_histogram(
+        target,
+        draft,
+        prefix,
+        n_samples,
+        gen,
+        accept_all=True,
+    )
+
+    # The draft model's own next-token distribution.
+    draft_probs = exact_next_probs(draft, prefix)
+
+    return {
+        "tv_speculative": total_variation(
+            spec_hist,
+            target_probs,
+        ),
+        "tv_accept_all": total_variation(
+            accept_all_hist,
+            target_probs,
+        ),
+        "tv_draft": total_variation(
+            draft_probs,
+            target_probs,
+        ),
+    }
+
