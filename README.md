@@ -13,6 +13,7 @@ python scaffold.py
 - [x] **1.** make_corpus
 - [x] **2.** TinyGPT
 - [x] **3.** train_lm
+- [x] **4.** generate
 
 ---
 

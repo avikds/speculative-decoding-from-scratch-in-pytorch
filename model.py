@@ -428,3 +428,61 @@ def make_models(seed=0, target_steps=300, draft_steps=300):
 
     return tok, data, target, draft
 
+# Step 4 - generate
+import torch
+
+def sample_from(probs, gen):
+    # Draw one token index from the probability distribution.
+    return int(torch.multinomial(probs, 1, generator=gen).item())
+
+
+def next_probs(logits_row, temperature):
+    if temperature > 0:
+        # Temperature-scaled softmax.
+        return torch.softmax(logits_row / temperature, dim=-1)
+
+    # At temperature zero, use a deterministic argmax as a one-hot vector.
+    idx = torch.argmax(logits_row)
+    probs = torch.zeros_like(logits_row)
+    probs[idx] = 1.0
+    return probs
+
+
+@torch.no_grad()
+def generate(model, prompt, n, temperature=1.0, gen=None):
+    # Nothing to generate means no model forward calls.
+    if n <= 0:
+        return [], 0
+
+    # TinyGPT expects a batch dimension.
+    idx = prompt.unsqueeze(0)
+
+    # First forward pass processes the complete prompt and creates the cache.
+    logits, cache = model(idx)
+
+    tokens = []
+    passes = 1
+
+    # Sample the first generated token directly from the final prompt position.
+    probs = next_probs(logits[0, -1], temperature)
+    token = sample_from(probs, gen)
+    tokens.append(token)
+
+    # Generate the remaining tokens one at a time using the KV cache.
+    while len(tokens) < n:
+        next_idx = torch.tensor(
+            [[token]],
+            dtype=prompt.dtype,
+            device=prompt.device,
+        )
+
+        logits, cache = model(next_idx, cache)
+
+        probs = next_probs(logits[0, -1], temperature)
+        token = sample_from(probs, gen)
+
+        tokens.append(token)
+        passes += 1
+
+    return tokens, passes
+
