@@ -25,6 +25,24 @@ python scaffold.py
 - [x] **13.** medusa_generate
 - [x] **14.** speedup_table
 
----
+## Results
 
-Built on Deep-ML.
+```
+plain decoding: 150 tokens in 150 target passes, 1.00 tokens per pass
+  sample: 'rho kernel omega kern omicron omicron nu cache decherhe ompt'
+
+draft-target (gamma 4): 150 tokens in 90 target passes, 1.67 tokens per pass, acceptance 0.41
+  distribution check at the prefix where draft and target disagree most (TV draft vs target 0.936):
+    verified speculative samples vs target: TV 0.003   accept-everything: TV 0.935
+  tokens per pass by draft length: gamma 1: 1.40 (formula 1.40)  gamma 2: 1.67 (formula 1.67)  gamma 4: 1.67 (formula 1.67)  gamma 8: 1.61 (formula 1.62)
+
+n-gram draft (4-gram table, gamma 4): 1.81 tokens per pass, acceptance 0.48
+medusa (3 heads, loss 3.28 -> 1.51): 1.60 tokens per pass, acceptance 0.40
+
+simulated speedup with per-token draft costs 0.08 (model), 0.00 (n-gram), 0.02 (medusa):
+  plain        tokens/pass  1.00  draft cost 0.00  speedup 1.00x
+  draft-target tokens/pass  1.67  draft cost 0.32  speedup 1.26x
+  ngram        tokens/pass  1.81  draft cost 0.00  speedup 1.81x
+  medusa       tokens/pass  1.60  draft cost 0.06  speedup 1.51x
+  best method on this workload: ngram
+```
