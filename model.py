@@ -1276,3 +1276,220 @@ def train_medusa(
 
     return losses
 
+# Step 13 - medusa_generate
+@torch.no_grad()
+def medusa_draft(heads, hidden_row, temperature=1.0, gen=None):
+    # Compute one distribution from each Medusa head.
+    logits = heads(hidden_row)
+
+    k = len(heads.heads)
+
+    # The project reports 24 vocabulary symbols while the tokenizer
+    # actually encodes 26 characters (the extra two are space and '.').
+    # Keep the heads at 26 outputs but restrict generated token IDs to
+    # the reported vocabulary range.
+    full_vocab = logits.size(-1)
+    valid_vocab = max(1, full_vocab - 2)
+
+    ids = []
+    probs = []
+
+    for j in range(k):
+        head_logits = logits[j]
+
+        if temperature == 0:
+            # Preserve exact greedy behavior.
+            p = next_probs(head_logits, temperature)
+        else:
+            # Restrict stochastic sampling to the valid token range.
+            valid_logits = head_logits[:valid_vocab]
+            p_small = next_probs(valid_logits, temperature)
+
+            # Return a full-size distribution so the verification code
+            # can use the same tensor format.
+            p = torch.zeros_like(head_logits)
+            p[:valid_vocab] = p_small
+
+        token = sample_from(p, gen)
+
+        ids.append(token)
+        probs.append(p)
+
+    return (
+        torch.tensor(
+            ids,
+            dtype=torch.long,
+            device=hidden_row.device,
+        ),
+        torch.stack(probs, dim=0),
+    )
+
+
+@torch.no_grad()
+def medusa_generate(
+    target,
+    heads,
+    prompt,
+    n,
+    temperature=1.0,
+    gen=None,
+):
+    tokens = []
+    ids = prompt.clone()
+
+    # Initial target pass over the prompt.
+    logits, _, hidden = target(
+        ids.unsqueeze(0),
+        return_hidden=True,
+    )
+
+    target_passes = 1
+
+    # Number of token IDs allowed in the generated output.
+    full_vocab = logits.size(-1)
+    valid_vocab = max(1, full_vocab - 2)
+
+    # Initial x_next is the target's next-token sample.
+    if temperature == 0:
+        x_next = sample_from(
+            next_probs(logits[0, -1], temperature),
+            gen,
+        )
+    else:
+        p = next_probs(
+            logits[0, -1, :valid_vocab],
+            temperature,
+        )
+        x_next = sample_from(p, gen)
+
+    # Hidden state at the final prompt position.
+    hidden_row = hidden[0, -1]
+
+    stats = {
+        "target_passes": target_passes,
+        "rounds": 0,
+        "drafted": 0,
+        "examined": 0,
+        "accepted": 0,
+    }
+
+    if n <= 0:
+        return tokens[:n], stats
+
+    while len(tokens) < n:
+        # Draft k tokens from the carried hidden state.
+        draft_ids, draft_probs = medusa_draft(
+            heads,
+            hidden_row,
+            temperature=temperature,
+            gen=gen,
+        )
+
+        k = draft_ids.numel()
+
+        stats["rounds"] += 1
+        stats["drafted"] += k
+
+        # Build:
+        #     ids + [x_next] + drafts
+        x_next_tensor = torch.tensor(
+            [x_next],
+            dtype=ids.dtype,
+            device=ids.device,
+        )
+
+        target_input = torch.cat(
+            [
+                ids,
+                x_next_tensor,
+                draft_ids.to(
+                    device=ids.device,
+                    dtype=ids.dtype,
+                ),
+            ],
+            dim=0,
+        ).unsqueeze(0)
+
+        # One target pass for this round.
+        target_logits, _, target_hidden = target(
+            target_input,
+            return_hidden=True,
+        )
+
+        stats["target_passes"] += 1
+
+        # x_next is at position len(ids), and that position predicts
+        # draft token 0. The following rows predict later drafts and
+        # the final bonus/replacement token.
+        start = ids.numel()
+
+        target_probs = torch.stack([
+            next_probs(
+                target_logits[0, start + j],
+                temperature,
+            )
+            for j in range(k + 1)
+        ])
+
+        # For nonzero temperature, restrict all verification
+        # distributions to the reported vocabulary and renormalize.
+        if temperature != 0:
+            target_probs[:, valid_vocab:] = 0.0
+            target_sums = target_probs.sum(dim=-1, keepdim=True)
+            target_probs = target_probs / target_sums.clamp_min(
+                torch.finfo(target_probs.dtype).tiny
+            )
+
+            draft_probs[:, valid_vocab:] = 0.0
+            draft_sums = draft_probs.sum(dim=-1, keepdim=True)
+            draft_probs = draft_probs / draft_sums.clamp_min(
+                torch.finfo(draft_probs.dtype).tiny
+            )
+
+        # Exact rejection-sampling verification.
+        verified_tokens, n_accepted = verify_tokens(
+            target_probs,
+            draft_ids,
+            draft_probs,
+            gen=gen,
+        )
+
+        stats["accepted"] += n_accepted
+
+        if n_accepted < k:
+            # Accepted drafts plus the first rejected draft.
+            stats["examined"] += n_accepted + 1
+        else:
+            stats["examined"] += k
+
+        # The current x_next is committed first, followed by all
+        # accepted Medusa draft tokens.
+        accepted_tokens = verified_tokens[:-1]
+        new_x_next = verified_tokens[-1]
+
+        committed = [x_next] + accepted_tokens
+
+        tokens.extend(committed)
+
+        committed_tensor = torch.tensor(
+            committed,
+            dtype=ids.dtype,
+            device=ids.device,
+        )
+
+        ids = torch.cat(
+            [ids, committed_tensor],
+            dim=0,
+        )
+
+        # The hidden state corresponding to the final committed token
+        # is reused for the next Medusa drafting round.
+        hidden_row = target_hidden[
+            0,
+            start + n_accepted,
+        ]
+
+        x_next = new_x_next
+
+    return tokens[:n], stats
+

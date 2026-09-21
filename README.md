@@ -22,6 +22,7 @@ python scaffold.py
 - [x] **10.** NgramModel
 - [x] **11.** ngram_speculation
 - [x] **12.** MedusaHeads
+- [x] **13.** medusa_generate
 
 ---
 
