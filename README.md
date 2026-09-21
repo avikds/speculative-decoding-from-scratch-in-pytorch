@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** speculative_generate
 - [x] **8.** check_distribution
 - [x] **9.** expected_tokens_per_pass
+- [x] **10.** NgramModel
 
 ---
 

@@ -920,3 +920,166 @@ def acceptance_by_gamma(target, draft, prompt, n, gammas, gen_seed=0):
 
     return results
 
+# Step 10 - NgramModel
+class NgramModel:
+    def __init__(self, n, vocab, k=0.1):
+        self.n = n
+        self.vocab = vocab
+        self.k = k
+        self.counts = {}
+
+    def fit(self, ids):
+        # Accept either a Python list or a 1-D tensor.
+        if isinstance(ids, torch.Tensor):
+            ids = ids.detach().cpu().tolist()
+        else:
+            ids = list(ids)
+
+        ids = [int(x) for x in ids]
+
+        # The tokenizer's reported vocab is 24, while the actual
+        # encoded character IDs also include space and period.
+        # Expand to cover every token that occurs in the data.
+        if ids:
+            required_vocab = max(ids) + 1
+
+            if required_vocab > self.vocab:
+                old_vocab = self.vocab
+                self.vocab = required_vocab
+
+                # Expand all previously-created count vectors.
+                for context, old_counts in self.counts.items():
+                    new_counts = torch.zeros(
+                        self.vocab,
+                        dtype=torch.float32,
+                    )
+                    new_counts[:old_vocab] = old_counts
+                    self.counts[context] = new_counts
+
+        context_len = self.n - 1
+
+        # Count every n-token window:
+        # (n-1)-token context -> following token.
+        for i in range(len(ids) - self.n + 1):
+            context = tuple(ids[i:i + context_len])
+            next_token = ids[i + context_len]
+
+            if context not in self.counts:
+                self.counts[context] = torch.zeros(
+                    self.vocab,
+                    dtype=torch.float32,
+                )
+
+            self.counts[context][next_token] += 1.0
+
+        return self
+
+    def probs(self, context):
+        # Convert the context to a Python list.
+        if isinstance(context, torch.Tensor):
+            context = context.detach().cpu().tolist()
+        else:
+            context = list(context)
+
+        context = [int(x) for x in context]
+        context_len = self.n - 1
+
+        # A context shorter than n-1 has no usable history.
+        if len(context) < context_len:
+            return torch.full(
+                (self.vocab,),
+                1.0 / self.vocab,
+                dtype=torch.float32,
+            )
+
+        # Only the final n-1 tokens matter.
+        key = tuple(context[-context_len:])
+
+        counts = self.counts.get(key)
+
+        # Unseen context -> uniform distribution.
+        if counts is None:
+            return torch.full(
+                (self.vocab,),
+                1.0 / self.vocab,
+                dtype=torch.float32,
+            )
+
+        # Add-k smoothing:
+        #     P(x | context) = (count(x) + k) /
+        #                      (total + k * vocab)
+        probs = counts + self.k
+        probs = probs / (
+            counts.sum() + self.k * self.vocab
+        )
+
+        return probs
+
+    @torch.no_grad()
+    def draft(self, prefix, gamma, gen=None, greedy=False):
+        # Work with a Python list for sequential context updates.
+        if isinstance(prefix, torch.Tensor):
+            current = prefix.detach().cpu().tolist()
+            device = prefix.device
+        else:
+            current = list(prefix)
+            device = None
+
+        current = [int(x) for x in current]
+
+        ids = []
+        probs = []
+
+        for _ in range(gamma):
+            # Get the next-token distribution from the N-gram table.
+            p = self.probs(current)
+
+            if greedy:
+                token = int(torch.argmax(p).item())
+            else:
+                token = int(
+                    torch.multinomial(
+                        p,
+                        1,
+                        generator=gen,
+                    ).item()
+                )
+
+            ids.append(token)
+            probs.append(p)
+
+            # Extend the context for the next prediction.
+            current.append(token)
+
+        draft_ids = torch.tensor(
+            ids,
+            dtype=torch.long,
+            device=device,
+        )
+
+        if len(probs) > 0:
+            draft_probs = torch.stack(probs, dim=0)
+        else:
+            draft_probs = torch.empty(
+                (0, self.vocab),
+                dtype=torch.float32,
+            )
+
+        if device is not None:
+            draft_probs = draft_probs.to(device)
+
+        return draft_ids, draft_probs
+
+    def draft_fn(self, gen=None, greedy=False):
+        # Match the same f(prefix, gamma) interface used by
+        # model_draft_fn() in the draft-target implementation.
+        def f(prefix, gamma):
+            return self.draft(
+                prefix,
+                gamma,
+                gen=gen,
+                greedy=greedy,
+            )
+
+        return f
+
