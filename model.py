@@ -429,8 +429,6 @@ def make_models(seed=0, target_steps=300, draft_steps=300):
     return tok, data, target, draft
 
 # Step 4 - generate
-import torch
-
 def sample_from(probs, gen):
     # Draw one token index from the probability distribution.
     return int(torch.multinomial(probs, 1, generator=gen).item())
