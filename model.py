@@ -542,3 +542,86 @@ def model_draft_fn(draft, temperature=1.0, gen=None):
 
     return f
 
+# Step 6 - verify_tokens
+def verify_tokens(target_probs, draft_ids, draft_probs, gen=None):
+    """
+    Verify draft tokens using exact speculative-decoding rejection sampling.
+
+    target_probs:
+        (gamma + 1, vocab), with one target distribution for each
+        proposed token plus a final distribution for the bonus token.
+
+    draft_ids:
+        (gamma,), the tokens proposed by the draft model.
+
+    draft_probs:
+        (gamma, vocab), the draft distributions used to sample draft_ids.
+
+    Returns:
+        (tokens, n_accepted)
+    """
+    tokens = []
+    n_accepted = 0
+
+    gamma = draft_ids.numel()
+
+    for i in range(gamma):
+        token = int(draft_ids[i].item())
+
+        # Target and draft probabilities for the proposed token.
+        p = target_probs[i, token]
+        q = draft_probs[i, token]
+
+        # Acceptance probability is min(1, p / q).
+        # A zero q cannot occur for a token sampled from q in exact
+        # arithmetic, but handle it safely for robustness.
+        if q.item() == 0.0:
+            accept_prob = 1.0 if p.item() > 0.0 else 0.0
+        else:
+            accept_prob = min(1.0, (p / q).item())
+
+        u = torch.rand((), generator=gen, device=target_probs.device)
+
+        if u.item() < accept_prob:
+            # Draft token accepted.
+            tokens.append(token)
+            n_accepted += 1
+        else:
+            # First rejection: sample from the residual distribution
+            # max(0, target_probs[i] - draft_probs[i]).
+            residual = torch.clamp(
+                target_probs[i] - draft_probs[i],
+                min=0.0,
+            )
+
+            total = residual.sum()
+
+            # Normalize the residual before sampling.
+            if total.item() > 0.0:
+                residual = residual / total
+            else:
+                # This should not occur for a valid rejection event,
+                # but prevents an invalid probability distribution
+                # from reaching torch.multinomial due to floating-point
+                # round-off.
+                residual = target_probs[i]
+
+                residual_sum = residual.sum()
+                if residual_sum.item() > 0.0:
+                    residual = residual / residual_sum
+                else:
+                    residual = torch.zeros_like(residual)
+                    residual[torch.argmax(target_probs[i])] = 1.0
+
+            replacement = sample_from(residual, gen)
+
+            tokens.append(replacement)
+            return tokens, n_accepted
+
+    # Every draft token was accepted, so draw one bonus token from
+    # the target distribution after all proposed tokens.
+    bonus = sample_from(target_probs[gamma], gen)
+    tokens.append(bonus)
+
+    return tokens, n_accepted
+
