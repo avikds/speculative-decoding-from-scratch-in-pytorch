@@ -624,8 +624,6 @@ def verify_tokens(target_probs, draft_ids, draft_probs, gen=None):
     return tokens, n_accepted
 
 # Step 7 - speculative_generate
-import torch
-
 @torch.no_grad()
 def speculative_generate(
     target,
