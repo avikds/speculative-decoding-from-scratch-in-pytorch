@@ -23,6 +23,7 @@ python scaffold.py
 - [x] **11.** ngram_speculation
 - [x] **12.** MedusaHeads
 - [x] **13.** medusa_generate
+- [x] **14.** speedup_table
 
 ---
 
