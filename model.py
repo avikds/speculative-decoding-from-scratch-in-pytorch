@@ -256,3 +256,175 @@ class TinyGPT(nn.Module):
 
         return logits, new_cache
 
+# Step 3 - train_lm
+def get_batch(data, batch, seq_len, gen):
+    # Draw random starting offsets using the supplied generator.
+    starts = torch.randint(
+        0,
+        len(data) - seq_len - 1,
+        (batch,),
+        generator=gen,
+    )
+
+    # Input tokens.
+    x = torch.stack([
+        data[start:start + seq_len]
+        for start in starts
+    ])
+
+    # Targets are shifted by exactly one token.
+    y = torch.stack([
+        data[start + 1:start + seq_len + 1]
+        for start in starts
+    ])
+
+    return x, y
+
+
+def _ensure_model_vocab(model, data):
+    """
+    Ensure the model can represent every token ID occurring in data.
+
+    Step 1 reports the alphabetic vocabulary size through tok.vocab,
+    while encode() also assigns IDs to space and period. Therefore the
+    actual number of token IDs can be larger than model.head.out_features.
+    """
+    required_vocab = int(data.max().item()) + 1
+    current_vocab = model.tok.num_embeddings
+
+    if required_vocab <= current_vocab:
+        return
+
+    # Expand the token embedding while preserving existing weights.
+    old_tok = model.tok
+    new_tok = nn.Embedding(
+        required_vocab,
+        old_tok.embedding_dim,
+        device=old_tok.weight.device,
+        dtype=old_tok.weight.dtype,
+    )
+
+    with torch.no_grad():
+        new_tok.weight[:current_vocab].copy_(old_tok.weight)
+
+    model.tok = new_tok
+
+    # Expand the output projection so all token IDs are valid targets.
+    old_head = model.head
+    new_head = nn.Linear(
+        old_head.in_features,
+        required_vocab,
+        bias=False,
+        device=old_head.weight.device,
+        dtype=old_head.weight.dtype,
+    )
+
+    with torch.no_grad():
+        new_head.weight[:current_vocab].copy_(old_head.weight)
+
+    model.head = new_head
+
+
+def train_lm(model, data, steps, lr=3e-3, batch=32, seq_len=64, seed=0):
+    # Make sure the model vocabulary covers every encoded token.
+    # This must happen before constructing the optimizer.
+    _ensure_model_vocab(model, data)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,
+    )
+
+    # Dedicated generator for reproducible batch sampling.
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+
+    losses = []
+
+    model.train()
+
+    for _ in range(steps):
+        x, y = get_batch(
+            data,
+            batch,
+            seq_len,
+            gen,
+        )
+
+        optimizer.zero_grad(set_to_none=True)
+
+        logits, _ = model(x)
+
+        # Cross-entropy over all positions in the batch.
+        loss = nn.functional.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            y.reshape(-1),
+        )
+
+        loss.backward()
+
+        # Required gradient clipping.
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            1.0,
+        )
+
+        optimizer.step()
+
+        losses.append(loss.item())
+
+    return losses
+
+
+def make_models(seed=0, target_steps=300, draft_steps=300):
+    # Build the deterministic synthetic corpus.
+    text = make_corpus(400, seed)
+
+    # Build the character tokenizer.
+    tok = CharTokenizer(text)
+
+    # Encode the complete corpus as a 1-D long tensor.
+    data = torch.tensor(
+        tok.encode(text),
+        dtype=torch.long,
+    )
+
+    # Construct the target model after setting the requested seed.
+    torch.manual_seed(seed)
+    target = TinyGPT(
+        tok.vocab,
+        64,
+        2,
+        4,
+    )
+
+    # Construct the draft model with seed + 1.
+    torch.manual_seed(seed + 1)
+    draft = TinyGPT(
+        tok.vocab,
+        32,
+        1,
+        2,
+    )
+
+    # Train both models using the same batch RNG seed.
+    train_lm(
+        target,
+        data,
+        target_steps,
+        seed=seed,
+    )
+
+    train_lm(
+        draft,
+        data,
+        draft_steps,
+        seed=seed,
+    )
+
+    # Both models must be in evaluation mode after training.
+    target.eval()
+    draft.eval()
+
+    return tok, data, target, draft
+
